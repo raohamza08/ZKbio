@@ -1,4 +1,4 @@
-import os, time
+import os, json, time
 from zk import ZK
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -7,15 +7,14 @@ from datetime import datetime, timedelta
 
 # ================= CONFIG =================
 DEVICES = {
-     "192.168.1.206": " 509 IN",    # Entry device
-     "192.168.1.205": " 509 OUT",   # Exit device
-     "192.168.1.207": " 609 OUT",    # Entry device
-     "192.168.1.208": " 609 IN",   # Exit device
+     "192.168.1.206": " 509 IN",
+     "192.168.1.205": " 509 OUT",
+     "192.168.1.207": " 609 OUT",
+     "192.168.1.208": " 609 IN",
 }
 DEVICE_PORT = 4370
 
-SHEET_ID   = "1Q5zQWb2WsLFeLhdOqYqppadwfasqBTBVl58xBTZm7gk"   # <-- set this
-SA_JSON = r"C:\Users\HP\Downloads\Slack Downloads\ZKSync\ZKSync\service_account.json"
+SHEET_ID   = "1Q5zQWb2WsLFeLhdOqYqppadwfasqBTBVl58xBTZm7gk"
 REGISTER_TAB = "DailyRegister"
 RAWLOG_TAB   = "RawLogs"
 
@@ -43,12 +42,20 @@ HEADERS_RAW = ["UserID","UserName","Punch Date","Punch Time","DeviceIP","Type"]
 
 # ---------- helpers ----------
 def authorize():
+    """Authorize with Google Sheets using secret stored in GitHub"""
     scope = ["https://spreadsheets.google.com/feeds",
              "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(SA_JSON, scope)
+
+    # Load service account from GitHub secret
+    secret_json = os.getenv("GOOGLE_SERVICE_ACCOUNT")
+    if not secret_json:
+        raise RuntimeError("❌ GOOGLE_SERVICE_ACCOUNT secret not found")
+
+    # Parse JSON string
+    creds_dict = json.loads(secret_json)
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     client = gspread.authorize(creds)
-    sh = client.open_by_key(SHEET_ID)
-    return sh
+    return client.open_by_key(SHEET_ID)
 
 def get_or_make(sh, tab, headers):
     try:
@@ -57,7 +64,6 @@ def get_or_make(sh, tab, headers):
         ws = sh.add_worksheet(title=tab, rows=40000, cols=len(headers))
         ws.append_row(headers)
         return ws
-    # fix header if needed
     current = ws.row_values(1)
     if current != headers:
         ws.delete_rows(1)
@@ -76,7 +82,6 @@ def hhmm(mins, blank=True):
 def parse_hhmm(s): return datetime.strptime(s,"%H:%M").time()
 
 def normalize_datetime(date_str, time_str):
-    """Try to parse stored sheet values (AM/PM or 24h) into datetime"""
     try:
         return datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %I:%M %p")
     except ValueError:
@@ -88,7 +93,6 @@ def normalize_datetime(date_str, time_str):
 # ------------------------------------------
 
 def fetch_logs():
-    """Fetch all logs from all devices"""
     logs = []
     users = {}
     for ip, dtype in DEVICES.items():
@@ -109,12 +113,11 @@ def fetch_logs():
     return logs, users
 
 def update_rawlogs(ws, logs):
-    """Append new logs without duplicates (AM/PM storage)"""
     existing = set()
     try:
-        ids = ws.col_values(1)[1:]   # UserIDs
-        dates = ws.col_values(3)[1:] # Punch Date
-        times = ws.col_values(4)[1:] # Punch Time
+        ids = ws.col_values(1)[1:]
+        dates = ws.col_values(3)[1:]
+        times = ws.col_values(4)[1:]
         for u, d, t in zip(ids, dates, times):
             parsed = normalize_datetime(d, t)
             if parsed:
@@ -137,20 +140,18 @@ def update_rawlogs(ws, logs):
         print("RawLogs: no new rows")
 
 def build_allregister(ws, logs, users):
-    """Summarize logs into register with all historical data"""
     by_user_date = defaultdict(list)
     for uid, uname, ts, ip, dtype in logs:
         by_user_date[(uid, ts.date())].append((ts, dtype, ip, uname))
 
-    # existing rows
     existing = {}
     all_vals = ws.get_all_values()
-    for idx, row in enumerate(all_vals[1:], start=2):  # skip header
+    for idx, row in enumerate(all_vals[1:], start=2):
         if row and row[0] and row[2]:
             time_in = row[4] if len(row) > 4 and row[4] else "12:00 AM"
             parsed = normalize_datetime(row[0], time_in)
             if parsed:
-                key = f"{row[0]}|{row[2]}"  # Date|UserID
+                key = f"{row[0]}|{row[2]}"
                 existing[key] = idx
 
     new_rows = []
@@ -158,13 +159,11 @@ def build_allregister(ws, logs, users):
         punches.sort(key=lambda x: x[0])
         uname = punches[0][3] if punches else users.get(uid,"")
 
-        # in/out
-        in_times  = [ts for ts,d,_,_ in punches if d=="IN"]
-        out_times = [ts for ts,d,_,_ in punches if d=="OUT"]
+        in_times  = [ts for ts,d,_,_ in punches if "IN" in d]
+        out_times = [ts for ts,d,_,_ in punches if "OUT" in d]
         tin  = min(in_times) if in_times else None
         tout = max(out_times) if out_times else None
 
-        # shift
         h = (tin or punches[0][0]).hour if punches else 8
         if uid in CUSTOM_SHIFTS:
             cfg = CUSTOM_SHIFTS[uid]; shift_name=cfg["name"]
@@ -196,7 +195,7 @@ def build_allregister(ws, logs, users):
         for i in range(len(punches)-1):
             t1,d1,_,_ = punches[i]
             t2,d2,_,_ = punches[i+1]
-            if d1=="OUT" and d2=="IN":
+            if "OUT" in d1 and "IN" in d2:
                 outside_total += minutes(t1,t2)
 
         row = [
