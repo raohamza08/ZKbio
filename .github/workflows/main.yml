@@ -1,4 +1,4 @@
-name: Daily ZKSync Sheet Update
+name: Daily zkbio Sheet Update
 
 on:
   schedule:
@@ -23,5 +23,5 @@ jobs:
       - name: Install dependencies
         run: pip install gspread oauth2client zk future
 
-      - name: Run ZKSync script
-        run: python zkbio/zk_to_sheets.py
+      - name: Run zkbio script
+        run: python zk_to_sheets.py
